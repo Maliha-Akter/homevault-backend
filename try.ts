@@ -1,9 +1,9 @@
 import express, { Request, Response, NextFunction } from 'express';
 import dotenv from 'dotenv';
 import cors from 'cors';
-import cookieParser from 'cookie-parser'; // 1. Imported
 import { MongoClient, ServerApiVersion, ObjectId, Collection, Db } from 'mongodb';
 import { createRemoteJWKSet, jwtVerify, JWTPayload } from 'jose-cjs';
+
 
 dotenv.config();
 
@@ -17,113 +17,69 @@ if (!uri) {
 
 const app = express();
 
-app.use(express.json());
-app.use(cookieParser()); // 1. Added middleware
-
 app.use(cors({
-    origin: "http://localhost:3000",
-    credentials: true,
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "Cookie"],
-    exposedHeaders: ["Set-Cookie"]
+  origin: "http://localhost:3000",
+  allowedHeaders: ["Content-Type", "Authorization", "Accept"]
 }));
+app.use(express.json());
 
-// 3. Updated interface to check for 'sub'
+// --- Document Interfaces & Types ---
 interface CustomJWTPayload extends JWTPayload {
-    sub: string;
-    role?: string;
-    isBlocked?: boolean;
+    id: string;
 }
 
 export interface AuthenticatedRequest extends Request {
     user?: CustomJWTPayload;
 }
 
+// --- MongoDB Client Setup ---
 const client = new MongoClient(uri, {
-    serverApi: { version: ServerApiVersion.v1, strict: true, deprecationErrors: true }
+    serverApi: {
+        version: ServerApiVersion.v1,
+        strict: true,
+        deprecationErrors: true,
+    }
 });
 
+// --- Remote JWKS Authentication Validation ---
 const JWKS = createRemoteJWKSet(new URL(`${process.env.CLIENT_URL}/api/auth/jwks`));
 
 const verifyToken = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
-    if (req.method === 'OPTIONS') return next();
-
-    // Debugging Logs
+    // 🔍 1. Log incoming tracking info
+    console.log("=== INCOMING AUTHENTICATION CHECK ===");
+    console.log("Request Path:", req.path);
+    console.log("All Headers received:", req.headers);
+    console.log("Cookies received (if cookie-parser is used):", (req as any).cookies);
     console.log("Authorization Header:", req.headers.authorization);
-    console.log("Cookies:", req.cookies);
 
     const authHeader = req.headers.authorization;
 
-    const token = authHeader?.startsWith("Bearer ")
-        ? authHeader.split(" ")[1]
-        : req.cookies?.["better-auth.session_token"];
-
-    if (!token) {
-        return res.status(401).json({
-            message: "Unauthorized: Missing Token"
-        });
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        console.warn("❌ Auth validation failed: Authorization header is missing or does not start with 'Bearer '");
+        return res.status(401).json({ message: "Unauthorized: Missing Token" });
     }
+
+    const token = authHeader.split(" ")[1];
+    console.log("Extracted Token substring:", token.substring(0, 15) + "...");
 
     try {
         const { payload } = await jwtVerify(token, JWKS);
-
-        console.log("JWT Payload:", payload);
-
-        // ---------------- NEW CODE START ----------------
-
-        // Better Auth stores the user id in payload.sub
-        const userId = payload.sub;
-
-        if (!userId) {
-            return res.status(401).json({
-                message: "Invalid token payload."
-            });
-        }
-
-        const db = client.db("homevault");
-
-        const user = await db.collection("user").findOne({
-            _id: ObjectId.isValid(userId)
-                ? new ObjectId(userId)
-                : userId
-        });
-
-        if (!user) {
-            return res.status(404).json({
-                message: "User not found."
-            });
-        }
-
-        if (user.isBlocked) {
-            return res.status(403).json({
-                message: "Your account has been blocked by the administrator."
-            });
-        }
-
-        // Attach JWT payload + role + isBlocked
-        req.user = {
-            ...(payload as CustomJWTPayload),
-            role: user.role,
-            isBlocked: user.isBlocked
-        } as any;
-
-        // ---------------- NEW CODE END ----------------
-
+        req.user = payload as CustomJWTPayload;
+        console.log("✅ Token successfully verified! User ID:", req.user.id);
         next();
-
     } catch (error: any) {
-        console.error(error);
-
-        return res.status(403).json({
-            message: "Forbidden: Invalid Token"
-        });
+        console.error("❌ JWT Verification Error:", error.message);
+        return res.status(403).json({ message: "Forbidden: Invalid Token" });
     }
 };
+
+// --- Main Application Execution Lifecycle ---
 async function run() {
     try {
+        // 1. Establish database connection link
         await client.connect();
+
         const db: Db = client.db("homevault");
-        // const usersCollection = db.collection('user');
         // 1. category table
         interface CategoryDocument {
             name: string;
@@ -136,8 +92,8 @@ async function run() {
             createdAt: Date;
         }
 
-
         const categoriesCollection: Collection<CategoryDocument> = db.collection('categories');
+
         // 2. Updated POST API Endpoint
         app.post('/api/categories', verifyToken, async (req: AuthenticatedRequest, res: Response) => {
             try {
@@ -189,7 +145,7 @@ async function run() {
             }
         });
         // 3. GET API Endpoint (with text search and radio-type type filtering)
-
+        // 3. GET API Endpoint (Filtering dynamically by Category Name)
         app.get('/api/categories', async (req: Request, res: Response) => {
             try {
                 const { search, categoryName } = req.query;
@@ -468,48 +424,145 @@ async function run() {
         });
 
         // PUT: Modify specific user attributes securely 
-        app.put('/api/user/profile', verifyToken, async (req: AuthenticatedRequest, res: Response) => {
+        app.put('/api/user/profile', verifyToken, async (req: any, res: Response) => {
             try {
-                // 3. Use .sub instead of .id
-                const userId = req.user?.sub;
+                const userId = req.user?.id;
                 const { name, image } = req.body;
 
                 if (!userId) {
                     return res.status(401).json({ success: false, message: "Unauthorized profile state adjustment." });
                 }
 
+                if (!name || !image) {
+                    return res.status(400).json({ success: false, message: "Missing mandatory fields." });
+                }
+
                 const queryId = ObjectId.isValid(userId) ? new ObjectId(userId) : userId;
 
                 const updateResult = await db.collection("user").updateOne(
                     { _id: queryId },
-                    { $set: { name: name?.trim(), image: image?.trim(), updatedAt: new Date() } }
+                    {
+                        $set: {
+                            name: name.trim(),
+                            image: image.trim(),
+                            updatedAt: new Date()
+                        }
+                    }
                 );
 
                 if (updateResult.matchedCount === 0) {
-                    return res.status(404).json({ success: false, message: "User not found." });
+                    return res.status(404).json({ success: false, message: "Profile update destination target missing." });
                 }
 
-                return res.status(200).json({ success: true, message: "Profile updated." });
+                return res.status(200).json({
+                    success: true,
+                    message: "Profile settings modified successfully."
+                });
+
             } catch (error) {
-                return res.status(500).json({ success: false, message: "Server error." });
+                console.error("Backend Profile Update Error:", error);
+                return res.status(500).json({ success: false, message: "Internal server handling error." });
             }
         });
-        // GET: Fetch all users (Admin only)
-        app.get("/api/admin/users", verifyToken, async (req: any, res: any) => {
-            if (req.user?.role !== "admin") return res.status(403).json({ success: false });
+        const verifyAdmin = (req: any, res: Response, next: any) => {
+            if (!req.user || req.user.role !== "admin") {
+                return res.status(403).json({
+                    success: false,
+                    message: "Access Denied. Elevated Administrative authorization level required."
+                });
+            }
+            next();
+        };
 
-            const users = await db.collection("user").find({}).project({ password: 0 }).toArray();
-            res.json({ success: true, data: users });
+        // GET: Fetch all application user parameters inside the Better-Auth "user" collection matrix
+        app.get('/api/admin/users', verifyToken, verifyAdmin, async (req: any, res: Response) => {
+            // 1. Log entry check
+            console.log(">>> [GET /api/admin/users] Route handler successfully reached.");
+            console.log(">>> [GET /api/admin/users] Decoded user from middleware token:", req.user);
+
+            try {
+                // Querying structural data targets cleanly while dropping sensitive credentials
+                const usersFromDb = await db.collection("user")
+                    .find({})
+                    .project({ password: 0, salt: 0 })
+                    .sort({ createdAt: -1 })
+                    .toArray();
+
+                // 2. Log database count
+                console.log(`>>> [GET /api/admin/users] Found ${usersFromDb.length} users in database.`);
+
+                // Map data safely to match frontend expectations with validation check guards
+                const formattedUsers = usersFromDb.map(user => {
+                    const parsedId = user._id ? user._id.toString() : "";
+                    return {
+                        id: parsedId,
+                        name: user.name || "Anonymous User",
+                        email: user.email || "",
+                        image: user.image || "",
+                        role: user.role || "user",
+                        isBlocked: !!user.isBlocked,
+                        createdAt: user.createdAt ? new Date(user.createdAt).toISOString() : new Date().toISOString()
+                    };
+                });
+
+                return res.status(200).json({
+                    success: true,
+                    users: formattedUsers
+                });
+
+            } catch (error) {
+                console.error("❌ [GET /api/admin/users] Error fetching administrative registry data:", error);
+                return res.status(500).json({ success: false, message: "Internal directory mapping error." });
+            }
         });
 
-        app.patch("/api/admin/users/:id/block", verifyToken, async (req: any, res: any) => {
-            if (req.user?.role !== "admin") return res.status(403).json({ success: false });
+        // PATCH: Toggle absolute state mutation metrics (Block / Active Status)
+        app.patch('/api/admin/users/toggle-block', verifyToken, verifyAdmin, async (req: any, res: Response) => {
+            // 1. Log entry check
+            console.log(">>> [PATCH /api/admin/users/toggle-block] Body received:", req.body);
 
-            await db.collection("user").updateOne(
-                { _id: new ObjectId(req.params.id) },
-                { $set: { isBlocked: req.body.isBlocked } }
-            );
-            res.json({ success: true });
+            try {
+                const { userId, isBlocked } = req.body;
+
+                if (!userId) {
+                    console.log("⚠️ [PATCH /api/admin/users/toggle-block] Rejected: Missing userId");
+                    return res.status(400).json({ success: false, message: "Target identity key signature missing." });
+                }
+
+                // Handle both standard string IDs and raw ObjectIds gracefully based on database layout
+                const targetId = ObjectId.isValid(userId) ? new ObjectId(userId) : userId;
+
+                // Perform atomic update inside user table
+                const updateResult = await db.collection("user").updateOne(
+                    { _id: targetId },
+                    {
+                        $set: {
+                            isBlocked: Boolean(isBlocked),
+                            updatedAt: new Date()
+                        }
+                    }
+                );
+
+                console.log(">>> [PATCH /api/admin/users/toggle-block] DB Update Result:", updateResult);
+
+                if (updateResult.matchedCount === 0) {
+                    console.log(`⚠️ [PATCH /api/admin/users/toggle-block] User not found for ID: ${userId}`);
+                    return res.status(404).json({ success: false, message: "Identity document context not found." });
+                }
+
+                const systemMessage = isBlocked
+                    ? "Account credential access has been suspended successfully."
+                    : "Account access authorization has been fully restored.";
+
+                return res.status(200).json({
+                    success: true,
+                    message: systemMessage
+                });
+
+            } catch (error) {
+                console.error("❌ [PATCH /api/admin/users/toggle-block] Error executing status profile toggle modification:", error);
+                return res.status(500).json({ success: false, message: "Internal server execution fault." });
+            }
         });
         console.log("Database initialized. HomeVault collections ready.");
 
