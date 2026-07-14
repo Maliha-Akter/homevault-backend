@@ -128,7 +128,7 @@ async function run() {
     try {
         await client.connect();
         const db: Db = client.db("homevault");
-        // const usersCollection = db.collection('user');
+        const usersCollection = db.collection('user');
         // 1. category table
         interface CategoryDocument {
             name: string;
@@ -855,6 +855,191 @@ async function run() {
             } catch (error) {
                 console.error("Dashboard Stats Error:", error);
                 return res.status(500).json({ success: false, message: "Failed to fetch dashboard metrics." });
+            }
+        });
+        app.get('/api/admin/dashboard/stats', verifyToken, async (req: Request, res: Response) => {
+            try {
+                // 1. Strict Authorization Check
+                const isAdmin = (req as any).user?.role === 'admin';
+                if (!isAdmin) {
+                    return res.status(403).json({ success: false, message: "Access denied. Admins only." });
+                }
+
+                const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+                // 2. Run parallel aggregations across the entire database for global admin stats
+                const [
+                    totalUsers,
+                    totalCategories,
+                    totalInventoryItems,
+                    defaultCategories,
+                    inventoryDistributionRaw,
+                    userGrowthRaw,
+                    itemsAddedRaw,
+                    latestUsers,
+                    latestCategories,
+                    latestInventory
+                ] = await Promise.all([
+                    // Core Total Counts (Global Scope)
+                    usersCollection.countDocuments(),
+                    categoriesCollection.countDocuments(),
+                    inventoryCollection.countDocuments(),
+                    categoriesCollection.countDocuments({ isDefault: true }),
+
+                    // Pie Chart: Inventory Items grouped by Category ID + Resilient Name Lookup
+                    inventoryCollection.aggregate([
+                        { $match: { categoryId: { $exists: true, $ne: null } } },
+                        {
+                            $group: {
+                                _id: "$categoryId",
+                                count: { $sum: 1 }
+                            }
+                        },
+                        {
+                            $lookup: {
+                                from: "categories",
+                                let: { catId: "$_id" },
+                                pipeline: [
+                                    {
+                                        $match: {
+                                            $expr: {
+                                                $eq: [
+                                                    "$_id",
+                                                    {
+                                                        $cond: {
+                                                            if: { $eq: [{ $type: "$$catId" }, "string"] },
+                                                            then: { $toObjectId: "$$catId" },
+                                                            else: "$$catId"
+                                                        }
+                                                    }
+                                                ]
+                                            }
+                                        }
+                                    }
+                                ],
+                                as: "categoryDetails"
+                            }
+                        },
+                        {
+                            $project: {
+                                name: { $ifNull: [{ $arrayElemAt: ["$categoryDetails.name", 0] }, "Uncategorized"] },
+                                value: "$count",
+                                _id: 0
+                            }
+                        }
+                    ]).toArray(),
+
+                    // Bar Chart: Global User Registrations (Corrected for Latest 6 Months)
+                    usersCollection.aggregate([
+                        { $match: { createdAt: { $exists: true, $ne: null } } },
+                        {
+                            $group: {
+                                _id: {
+                                    year: { $year: { $toDate: "$createdAt" } },
+                                    month: { $month: { $toDate: "$createdAt" } }
+                                },
+                                count: { $sum: 1 }
+                            }
+                        },
+                        { $sort: { "_id.year": -1, "_id.month": -1 } }, // Grab the most recent months first
+                        { $limit: 6 },
+                        { $sort: { "_id.year": 1, "_id.month": 1 } }   // Re-sort chronologically for UI chart layout
+                    ]).toArray(),
+
+                    // Line Chart: Global Inventory Additions Timeline (Corrected for Latest 6 Months)
+                    inventoryCollection.aggregate([
+                        { $match: { createdAt: { $exists: true, $ne: null } } },
+                        {
+                            $group: {
+                                _id: {
+                                    year: { $year: { $toDate: "$createdAt" } },
+                                    month: { $month: { $toDate: "$createdAt" } }
+                                },
+                                count: { $sum: 1 }
+                            }
+                        },
+                        { $sort: { "_id.year": -1, "_id.month": -1 } }, // Grab the most recent months first
+                        { $limit: 6 },
+                        { $sort: { "_id.year": 1, "_id.month": 1 } }   // Re-sort chronologically for UI chart layout
+                    ]).toArray(),
+
+                    // Recent System Activity Pulls (Last 3 entries from each collection)
+                    usersCollection.find({}).sort({ createdAt: -1 }).limit(3).toArray(),
+                    categoriesCollection.find({}).sort({ createdAt: -1 }).limit(3).toArray(),
+                    inventoryCollection.find({}).sort({ createdAt: -1 }).limit(3).toArray()
+                ]);
+
+                // 3. Format Chronological Growth Labels safely
+                const userGrowth = userGrowthRaw.map(item => ({
+                    month: item._id ? (monthNames[item._id.month - 1] || `${item._id.month}/${item._id.year}`) : "Unknown",
+                    count: item.count
+                }));
+
+                const itemsAdded = itemsAddedRaw.map(item => ({
+                    month: item._id ? (monthNames[item._id.month - 1] || `${item._id.month}/${item._id.year}`) : "Unknown",
+                    count: item.count
+                }));
+
+                // 4. Construct unified dynamic Activity Feed
+                const activities: any[] = [];
+
+                latestUsers.forEach(u => {
+                    activities.push({
+                        id: `user_${u._id}`,
+                        type: 'user',
+                        message: `${u.name || 'A new user'} joined the system.`,
+                        createdAt: u.createdAt
+                    });
+                });
+
+                latestCategories.forEach(c => {
+                    activities.push({
+                        id: `cat_${c._id}`,
+                        type: 'category',
+                        message: `${c.createdBy === 'admin' ? 'Admin' : 'A user'} created the "${c.name}" category.`,
+                        createdAt: c.createdAt
+                    });
+                });
+
+                latestInventory.forEach(i => {
+                    activities.push({
+                        id: `inv_${i._id}`,
+                        type: 'inventory',
+                        message: `An item "${i.title}" was added to the ${i.room || 'Storage'}.`,
+                        createdAt: i.createdAt
+                    });
+                });
+
+                // Sort compilation array globally by real-time timestamps
+                const sortedActivityFeed = activities
+                    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+                    .slice(0, 5);
+
+                // 5. Response Pipeline Delivery
+                return res.status(200).json({
+                    success: true,
+                    data: {
+                        cards: {
+                            totalUsers,
+                            totalCategories,
+                            totalInventoryItems,
+                            defaultCategories
+                        },
+                        charts: {
+                            inventoryDistribution: inventoryDistributionRaw,
+                            userGrowth,
+                            itemsAdded
+                        },
+                        recentActivity: sortedActivityFeed
+                    }
+                });
+
+            } catch (error) {
+                console.error("Dashboard Global Aggregation Failure:", error);
+                return res.status(500).json({
+                    success: false,
+                    message: "Internal server error: Failed to fetch admin metrics dashboard data cleanly."
+                });
             }
         });
         console.log("Database initialized. HomeVault collections ready.");
