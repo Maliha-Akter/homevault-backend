@@ -31,6 +31,7 @@ app.use(cors({
 // 3. Updated interface to check for 'sub'
 interface CustomJWTPayload extends JWTPayload {
     sub: string;
+    id?: string; // Add this
     role?: string;
     isBlocked?: boolean;
 }
@@ -48,9 +49,12 @@ const JWKS = createRemoteJWKSet(new URL(`${process.env.CLIENT_URL}/api/auth/jwks
 const verifyToken = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
     if (req.method === 'OPTIONS') return next();
 
-    // Debugging Logs
-    console.log("Authorization Header:", req.headers.authorization);
-    console.log("Cookies:", req.cookies);
+    console.log("Authorization length:", req.headers.authorization?.length);
+
+    console.log(
+        "Cookie header length:",
+        req.headers.cookie?.length
+    );
 
     const authHeader = req.headers.authorization;
 
@@ -103,6 +107,7 @@ const verifyToken = async (req: AuthenticatedRequest, res: Response, next: NextF
         // Attach JWT payload + role + isBlocked
         req.user = {
             ...(payload as CustomJWTPayload),
+            id: payload.sub, // Map sub to id
             role: user.role,
             isBlocked: user.isBlocked
         } as any;
@@ -129,7 +134,11 @@ async function run() {
             name: string;
             icon: string;
             image: string;
-            description: string;
+            shortDescription: string;     // Added
+            fullDescription: string;      // Added
+            itemTypes: string[];          // Added (Array)
+            popularBrands: string[];      // Added (Array)
+            organizationTips: string[];   // Added (Array)
             createdBy: string;
             isDefault: boolean;
             isApproved: boolean;
@@ -141,10 +150,19 @@ async function run() {
         // 2. Updated POST API Endpoint
         app.post('/api/categories', verifyToken, async (req: AuthenticatedRequest, res: Response) => {
             try {
-                const { name, icon, image, description } = req.body;
+                const {
+                    name,
+                    icon,
+                    image,
+                    shortDescription,
+                    fullDescription,
+                    itemTypes,
+                    popularBrands,
+                    organizationTips
+                } = req.body;
+
                 const userId = req.user?.id || "unknown";
 
-                // Basic validation
                 if (!name) {
                     return res.status(400).json({
                         success: false,
@@ -152,7 +170,6 @@ async function run() {
                     });
                 }
 
-                // Prevent duplicate names safely by checking case-insensitively using regex matching
                 const existing = await categoriesCollection.findOne({
                     name: { $regex: `^${name.trim()}$`, $options: 'i' }
                 });
@@ -168,7 +185,11 @@ async function run() {
                     name: name.trim(),
                     icon: icon || "Box",
                     image: image || "",
-                    description: description || "",
+                    shortDescription: shortDescription || "",
+                    fullDescription: fullDescription || "",
+                    itemTypes: Array.isArray(itemTypes) ? itemTypes : [],
+                    popularBrands: Array.isArray(popularBrands) ? popularBrands : [],
+                    organizationTips: Array.isArray(organizationTips) ? organizationTips : [],
                     createdBy: userId,
                     isDefault: false,
                     isApproved: false,
@@ -190,41 +211,134 @@ async function run() {
         });
         // 3. GET API Endpoint (with text search and radio-type type filtering)
 
+        // Backend: GET /api/categories
         app.get('/api/categories', async (req: Request, res: Response) => {
             try {
                 const { search, categoryName } = req.query;
-                const query: any = {};
+                let filter: any = {};
 
-                // 1. Text Search Filter (for the search input box)
                 if (search) {
-                    query.name = { $regex: search.toString().trim(), $options: 'i' };
+                    filter.name = { $regex: search, $options: 'i' };
+                }
+                if (categoryName && categoryName !== 'all') {
+                    filter.name = categoryName;
                 }
 
-                // 2. Exact Category Name Filter (for the radio pills selection)
-                if (categoryName && categoryName.toString().toLowerCase() !== 'all') {
-                    query.name = categoryName.toString().trim();
-                }
-
-                // Fetch categories sorted by newest creation date
-                const categories = await categoriesCollection
-                    .find(query)
-                    .sort({ createdAt: -1 })
-                    .toArray();
+                const categories = await categoriesCollection.find(filter).toArray();
 
                 return res.status(200).json({
                     success: true,
-                    count: categories.length,
-                    data: categories
+                    data: categories // Returns the full document including shortDescription, icon, etc.
                 });
-
-            } catch (error: any) {
-                console.error("Error fetching categories:", error);
-                return res.status(500).json({
-                    success: false,
-                    message: "Internal server error."
-                });
+            } catch (error) {
+                return res.status(500).json({ success: false, message: "Internal server error." });
             }
         });
+        app.put('/api/categories/:id', verifyToken, async (req: AuthenticatedRequest, res: Response) => {
+            try {
+                const { id } = req.params;
+                const { name, icon, image, shortDescription, fullDescription, itemTypes, popularBrands, organizationTips } = req.body;
+
+                if (!ObjectId.isValid(id)) {
+                    return res.status(400).json({ success: false, message: "Invalid category ID." });
+                }
+
+                // Check if name is being changed to an already existing name
+                if (name) {
+                    const existing = await categoriesCollection.findOne({
+                        name: { $regex: `^${name.trim()}$`, $options: 'i' },
+                        _id: { $ne: new ObjectId(id) } // Ensure it's not the same document
+                    });
+                    if (existing) {
+                        return res.status(409).json({ success: false, message: "A category with this name already exists." });
+                    }
+                }
+
+                const updateData = {
+                    ...(name && { name: name.trim() }),
+                    icon: icon || "Box",
+                    image: image || "",
+                    shortDescription: shortDescription || "",
+                    fullDescription: fullDescription || "",
+                    itemTypes: Array.isArray(itemTypes) ? itemTypes : [],
+                    popularBrands: Array.isArray(popularBrands) ? popularBrands : [],
+                    organizationTips: Array.isArray(organizationTips) ? organizationTips : [],
+                    updatedAt: new Date()
+                };
+
+                const result = await categoriesCollection.updateOne(
+                    { _id: new ObjectId(id) },
+                    { $set: updateData }
+                );
+
+                if (result.matchedCount === 0) {
+                    return res.status(404).json({ success: false, message: "Category not found." });
+                }
+
+                return res.status(200).json({ success: true, message: "Category updated successfully." });
+
+            } catch (error: any) {
+                console.error("Error updating category:", error);
+                return res.status(500).json({ success: false, message: "Internal server error." });
+            }
+        });
+
+        // DELETE: Remove a category
+        app.delete('/api/categories/:id', verifyToken, async (req: AuthenticatedRequest, res: Response) => {
+            try {
+                const { id } = req.params;
+
+                if (!ObjectId.isValid(id)) {
+                    return res.status(400).json({ success: false, message: "Invalid category ID." });
+                }
+
+                const result = await categoriesCollection.deleteOne({ _id: new ObjectId(id) });
+
+                if (result.deletedCount === 0) {
+                    return res.status(404).json({ success: false, message: "Category not found." });
+                }
+
+                return res.status(200).json({ success: true, message: "Category deleted successfully." });
+
+            } catch (error: any) {
+                console.error("Error deleting category:", error);
+                return res.status(500).json({ success: false, message: "Internal server error." });
+            }
+        });
+
+        // GET: Single Category (to populate the Edit page form)
+        app.get('/api/categories/:id', async (req: Request, res: Response) => {
+            try {
+                const { id } = req.params;
+
+                // 1. Validate ID format
+                if (!ObjectId.isValid(id)) {
+                    return res.status(400).json({ success: false, message: "Invalid ID format." });
+                }
+
+                // 2. Fetch the category
+                // Ensure you are targeting the correct collection
+                const category = await categoriesCollection.findOne({ _id: new ObjectId(id) });
+
+                // 3. Handle 404
+                if (!category) {
+                    return res.status(404).json({ success: false, message: "Category not found." });
+                }
+
+                // 4. Return full document
+                // Because your database document already contains the new fields 
+                // (fullDescription, itemTypes, etc.), this will send them to the client automatically.
+                return res.status(200).json({
+                    success: true,
+                    data: category
+                });
+
+            } catch (error) {
+                console.error("Error fetching category details:", error);
+                return res.status(500).json({ success: false, message: "Internal server error." });
+            }
+        });
+
 
         interface InventoryDocument {
             userId: string;
@@ -302,6 +416,38 @@ async function run() {
             }
         });
         // 3. GET API Endpoint: Retrieve Inventory Items (with User Filter)
+        // app.get('/api/inventory', verifyToken, async (req: any, res: Response) => {
+        //     try {
+        //         const userId = req.user?.id;
+        //         const { categoryId } = req.query;
+
+        //         if (!userId) {
+        //             return res.status(401).json({ success: false, message: "Unauthorized." });
+        //         }
+
+        //         const query: any = { userId: userId };
+
+        //         if (categoryId) {
+        //             query.categoryId = categoryId.toString();
+        //         }
+
+        //         const items = await inventoryCollection
+        //             .find(query)
+        //             .sort({ createdAt: -1 })
+        //             .toArray();
+
+        //         return res.status(200).json({
+        //             success: true,
+        //             count: items.length,
+        //             data: items
+        //         });
+
+        //     } catch (error) {
+        //         console.error("Error fetching inventory items:", error);
+        //         return res.status(500).json({ success: false, message: "Internal server error." });
+        //     }
+        // });
+        // 3. GET API Endpoint: Retrieve Inventory Items (with Category Join)
         app.get('/api/inventory', verifyToken, async (req: any, res: Response) => {
             try {
                 const userId = req.user?.id;
@@ -311,16 +457,53 @@ async function run() {
                     return res.status(401).json({ success: false, message: "Unauthorized." });
                 }
 
-                const query: any = { userId: userId };
+                const matchStage: any = { userId: userId };
 
                 if (categoryId) {
-                    query.categoryId = categoryId.toString();
+                    matchStage.categoryId = categoryId.toString();
                 }
 
-                const items = await inventoryCollection
-                    .find(query)
-                    .sort({ createdAt: -1 })
-                    .toArray();
+                // Using Aggregation Pipeline to join the Category Collection
+                const items = await inventoryCollection.aggregate([
+                    { $match: matchStage },
+                    {
+                        $lookup: {
+                            from: "categories", // Ensure this matches your actual MongoDB collection name!
+                            let: { catIdString: "$categoryId" },
+                            pipeline: [
+                                {
+                                    $match: {
+                                        $expr: {
+                                            // Converts the stored string ID to ObjectId to match categories._id
+                                            $eq: ["$_id", { $toObjectId: "$$catIdString" }]
+                                        }
+                                    }
+                                },
+                                // Only pull the title/name fields to keep the response lightweight
+                                { $project: { title: 1, name: 1 } }
+                            ],
+                            as: "categoryInfo"
+                        }
+                    },
+                    {
+                        // Flatten the lookup array into a readable field on the inventory object
+                        $addFields: {
+                            categoryName: {
+                                $ifNull: [
+                                    { $arrayElemAt: ["$categoryInfo.title", 0] },
+                                    { $ifNull: [{ $arrayElemAt: ["$categoryInfo.name", 0] }, "Unknown Category"] }
+                                ]
+                            }
+                        }
+                    },
+                    {
+                        // Clean up the temporary array
+                        $project: {
+                            categoryInfo: 0
+                        }
+                    },
+                    { $sort: { createdAt: -1 } }
+                ]).toArray();
 
                 return res.status(200).json({
                     success: true,
@@ -510,6 +693,169 @@ async function run() {
                 { $set: { isBlocked: req.body.isBlocked } }
             );
             res.json({ success: true });
+        });
+
+
+        // Assuming you have an authentication middleware that populates req.user
+        app.get('/api/dashboard/stats', verifyToken, async (req: Request, res: Response) => {
+            try {
+                // 1. Extract and convert userId from the authenticated session/token
+                const userIdString = (req as any).user?.id || (req as any).user?._id;
+
+                if (!userIdString) {
+                    return res.status(401).json({ success: false, message: "Unauthorized. No session found." });
+                }
+
+                // Ensure we match MongoDB ObjectId if stored as ObjectId, or string if stored as string
+                const userFilter = ObjectId.isValid(userIdString)
+                    ? { $in: [new ObjectId(userIdString), userIdString] }
+                    : userIdString;
+
+                const baseMatch = { userId: userFilter };
+
+                // 2. Calculate "Start of This Month" for recent metric
+                const now = new Date();
+                const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+
+                // 3. Run parallel aggregations for maximum performance
+                const [
+                    basicStats,
+                    itemsByCategory,
+                    itemsByRoom,
+                    monthlyGrowth,
+                    recentActivity
+                ] = await Promise.all([
+                    // A. Total Items, Total Value, Categories Used, Added This Month
+                    inventoryCollection.aggregate([
+                        { $match: { userId: userFilter } },
+                        {
+                            $group: {
+                                _id: null,
+                                totalItems: { $sum: 1 },
+                                estimatedValue: { $sum: { $toDouble: "$estimatedValue" } },
+                                uniqueCategories: { $addToSet: "$categoryId" },
+                                itemsThisMonth: {
+                                    $sum: {
+                                        $cond: [{ $gte: ["$createdAt", startOfMonth] }, 1, 0]
+                                    }
+                                }
+                            }
+                        },
+                        {
+                            $project: {
+                                totalItems: 1,
+                                estimatedValue: 1,
+                                categoriesUsed: { $size: "$uniqueCategories" },
+                                itemsThisMonth: 1
+                            }
+                        }
+                    ]).toArray(),
+
+                    // B. Chart: Items by Category (Joining with Categories table to get names)
+                    // B. Chart: Items by Category
+                    inventoryCollection.aggregate([
+                        { $match: { userId: userFilter } },
+                        {
+                            $group: {
+                                _id: "$categoryId",
+                                count: { $sum: 1 }
+                            }
+                        },
+                        {
+                            $lookup: {
+                                from: "categories",
+                                let: { catId: "$_id" },
+                                pipeline: [
+                                    {
+                                        $match: {
+                                            $expr: {
+                                                $eq: ["$_id", { $toObjectId: "$$catId" }] // Converts string ID to ObjectId for matching
+                                            }
+                                        }
+                                    }
+                                ],
+                                as: "categoryInfo"
+                            }
+                        },
+                        {
+                            $project: {
+                                name: { $ifNull: [{ $arrayElemAt: ["$categoryInfo.name", 0] }, "Uncategorized"] },
+                                value: "$count"
+                            }
+                        }
+                    ]).toArray(),
+
+                    // C. Chart: Items by Room
+                    inventoryCollection.aggregate([
+                        { $match: { userId: userFilter } },
+                        {
+                            $group: {
+                                _id: { $ifNull: ["$room", "Unassigned"] },
+                                count: { $sum: 1 }
+                            }
+                        }, {
+                            $project: {
+                                room: "$_id",
+                                count: 1,
+                                _id: 0
+                            }
+                        },
+                        { $sort: { count: -1 } }, { $limit: 6 } // Top 6 rooms
+                    ]).toArray(),
+
+                    // D. Chart: Items Added Monthly (Last 6 Months)
+                    inventoryCollection.aggregate([
+                        { $match: { userId: userFilter } },
+                        {
+                            $group: {
+                                _id: {
+                                    year: { $year: "$createdAt" },
+                                    month: { $month: "$createdAt" }
+                                },
+                                count: { $sum: 1 }
+                            }
+                        }, { $sort: { "_id.year": 1, "_id.month": 1 } },
+                        { $limit: 6 }, {
+                            $project: {
+                                month: {
+                                    $concat: [
+                                        { $toString: "$_id.month" }, "/", { $toString: "$_id.year" }
+                                    ]
+                                },
+                                items: "$count",
+                                _id: 0
+                            }
+                        }
+                    ]).toArray(),
+
+                    // E. Recent Activity (Last 5 modified/created items)
+                    inventoryCollection.find({ userId: userFilter })
+                        .sort({ createdAt: -1 })
+                        .limit(5)
+                        .project({ title: 1, brand: 1, room: 1, createdAt: 1, condition: 1 })
+                        .toArray()
+                ]);
+
+                // Format and send response
+                const stats = basicStats[0] || { totalItems: 0, estimatedValue: 0, categoriesUsed: 0, itemsThisMonth: 0 };
+
+                return res.status(200).json({
+                    success: true,
+                    data: {
+                        cards: stats,
+                        charts: {
+                            itemsByCategory,
+                            itemsByRoom,
+                            monthlyGrowth
+                        },
+                        recentActivity
+                    }
+                });
+
+            } catch (error) {
+                console.error("Dashboard Stats Error:", error);
+                return res.status(500).json({ success: false, message: "Failed to fetch dashboard metrics." });
+            }
         });
         console.log("Database initialized. HomeVault collections ready.");
 
