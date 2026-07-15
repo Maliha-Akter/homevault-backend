@@ -208,33 +208,80 @@ async function run() {
         // Backend: GET /api/categories
         app.get('/api/categories', async (req: Request, res: Response) => {
             try {
-                const { search, categoryName, page: pageQuery, limit: limitQuery } = req.query;
+                const {
+                    search,
+                    categoryName,
+                    timeFrame,
+                    sortBy = 'newest',
+                    page: pageQuery,
+                    limit: limitQuery
+                } = req.query;
+
                 let filter: any = {};
 
+                // 1. Search Filter
                 if (search) {
                     filter.name = { $regex: search, $options: 'i' };
                 }
+
+                // 2. Category Name Filter
                 if (categoryName && categoryName !== 'all') {
                     filter.name = categoryName;
                 }
 
-                // Support fetching all records at once (needed for your frontend's initial filter button list)
+                // 3. Date / TimeFrame Filter
+                if (timeFrame && timeFrame !== 'all') {
+                    const now = new Date();
+                    let startDate = new Date();
+
+                    if (timeFrame === 'today') {
+                        startDate.setHours(0, 0, 0, 0);
+                    } else if (timeFrame === 'week') {
+                        startDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+                    } else if (timeFrame === 'month') {
+                        startDate = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+                    }
+
+                    filter.createdAt = { $gte: startDate };
+                }
+
+                // 4. Set Up Sorting Options
+                let sortOptions: any = { createdAt: -1 }; // Default: Newest First
+
+                if (sortBy === 'oldest') {
+                    sortOptions = { createdAt: 1 };
+                } else if (sortBy === 'name-asc') {
+                    sortOptions = { name: 1 }; // A-Z
+                } else if (sortBy === 'name-desc') {
+                    sortOptions = { name: -1 }; // Z-A
+                }
+
+                // 5. Support fetching all records at once (for frontend initial filter bar)
                 if (limitQuery === 'all') {
-                    const categories = await categoriesCollection.find(filter).toArray();
+                    const categories = await categoriesCollection
+                        .find(filter)
+                        .sort(sortOptions) // Added sorting here
+                        .toArray();
+
                     return res.status(200).json({
                         success: true,
                         data: categories
                     });
                 }
 
-                // Parse pagination values
+                // 6. Parse pagination values
                 const page = parseInt(pageQuery as string) || 1;
                 const limit = parseInt(limitQuery as string) || 9;
                 const skip = (page - 1) * limit;
 
-                // Fetch data pages and total counts concurrently
+                // 7. Fetch data pages and total counts concurrently
                 const [categories, totalItems] = await Promise.all([
-                    categoriesCollection.find(filter).skip(skip).limit(limit).toArray(),
+                    categoriesCollection
+                        .find(filter)
+                        .sort(sortOptions) // Added sorting here
+                        .skip(skip)
+                        .limit(limit)
+                        .toArray(),
                     categoriesCollection.countDocuments(filter)
                 ]);
 
@@ -249,8 +296,13 @@ async function run() {
                         totalItems
                     }
                 });
+
             } catch (error) {
-                return res.status(500).json({ success: false, message: "Internal server error." });
+                console.error("Error fetching categories:", error);
+                return res.status(500).json({
+                    success: false,
+                    message: "Internal server error."
+                });
             }
         });
         app.get('/api/categories/random', async (req: Request, res: Response) => {
@@ -875,6 +927,191 @@ async function run() {
                 return res.status(500).json({ success: false, message: "Failed to fetch dashboard metrics." });
             }
         });
+        // app.get('/api/admin/dashboard/stats', verifyToken, async (req: Request, res: Response) => {
+        //     try {
+        //         // 1. Strict Authorization Check
+        //         const isAdmin = (req as any).user?.role === 'admin';
+        //         if (!isAdmin) {
+        //             return res.status(403).json({ success: false, message: "Access denied. Admins only." });
+        //         }
+
+        //         const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+        //         // 2. Run parallel aggregations across the entire database for global admin stats
+        //         const [
+        //             totalUsers,
+        //             totalCategories,
+        //             totalInventoryItems,
+        //             defaultCategories,
+        //             inventoryDistributionRaw,
+        //             userGrowthRaw,
+        //             itemsAddedRaw,
+        //             latestUsers,
+        //             latestCategories,
+        //             latestInventory
+        //         ] = await Promise.all([
+        //             // Core Total Counts (Global Scope)
+        //             usersCollection.countDocuments(),
+        //             categoriesCollection.countDocuments(),
+        //             inventoryCollection.countDocuments(),
+        //             categoriesCollection.countDocuments({ isDefault: true }),
+
+        //             // Pie Chart: Inventory Items grouped by Category ID + Resilient Name Lookup
+        //             inventoryCollection.aggregate([
+        //                 { $match: { categoryId: { $exists: true, $ne: null } } },
+        //                 {
+        //                     $group: {
+        //                         _id: "$categoryId",
+        //                         count: { $sum: 1 }
+        //                     }
+        //                 },
+        //                 {
+        //                     $lookup: {
+        //                         from: "categories",
+        //                         let: { catId: "$_id" },
+        //                         pipeline: [
+        //                             {
+        //                                 $match: {
+        //                                     $expr: {
+        //                                         $eq: [
+        //                                             "$_id",
+        //                                             {
+        //                                                 $cond: {
+        //                                                     if: { $eq: [{ $type: "$$catId" }, "string"] },
+        //                                                     then: { $toObjectId: "$$catId" },
+        //                                                     else: "$$catId"
+        //                                                 }
+        //                                             }
+        //                                         ]
+        //                                     }
+        //                                 }
+        //                             }
+        //                         ],
+        //                         as: "categoryDetails"
+        //                     }
+        //                 },
+        //                 {
+        //                     $project: {
+        //                         name: { $ifNull: [{ $arrayElemAt: ["$categoryDetails.name", 0] }, "Uncategorized"] },
+        //                         value: "$count",
+        //                         _id: 0
+        //                     }
+        //                 }
+        //             ]).toArray(),
+
+        //             // Bar Chart: Global User Registrations (Corrected for Latest 6 Months)
+        //             usersCollection.aggregate([
+        //                 { $match: { createdAt: { $exists: true, $ne: null } } },
+        //                 {
+        //                     $group: {
+        //                         _id: {
+        //                             year: { $year: { $toDate: "$createdAt" } },
+        //                             month: { $month: { $toDate: "$createdAt" } }
+        //                         },
+        //                         count: { $sum: 1 }
+        //                     }
+        //                 },
+        //                 { $sort: { "_id.year": -1, "_id.month": -1 } }, // Grab the most recent months first
+        //                 { $limit: 6 },
+        //                 { $sort: { "_id.year": 1, "_id.month": 1 } }   // Re-sort chronologically for UI chart layout
+        //             ]).toArray(),
+
+        //             // Line Chart: Global Inventory Additions Timeline (Corrected for Latest 6 Months)
+        //             inventoryCollection.aggregate([
+        //                 { $match: { createdAt: { $exists: true, $ne: null } } },
+        //                 {
+        //                     $group: {
+        //                         _id: {
+        //                             year: { $year: { $toDate: "$createdAt" } },
+        //                             month: { $month: { $toDate: "$createdAt" } }
+        //                         },
+        //                         count: { $sum: 1 }
+        //                     }
+        //                 },
+        //                 { $sort: { "_id.year": -1, "_id.month": -1 } }, // Grab the most recent months first
+        //                 { $limit: 6 },
+        //                 { $sort: { "_id.year": 1, "_id.month": 1 } }   // Re-sort chronologically for UI chart layout
+        //             ]).toArray(),
+
+        //             // Recent System Activity Pulls (Last 3 entries from each collection)
+        //             usersCollection.find({}).sort({ createdAt: -1 }).limit(3).toArray(),
+        //             categoriesCollection.find({}).sort({ createdAt: -1 }).limit(3).toArray(),
+        //             inventoryCollection.find({}).sort({ createdAt: -1 }).limit(3).toArray()
+        //         ]);
+
+        //         // 3. Format Chronological Growth Labels safely
+        //         const userGrowth = userGrowthRaw.map(item => ({
+        //             month: item._id ? (monthNames[item._id.month - 1] || `${item._id.month}/${item._id.year}`) : "Unknown",
+        //             count: item.count
+        //         }));
+
+        //         const itemsAdded = itemsAddedRaw.map(item => ({
+        //             month: item._id ? (monthNames[item._id.month - 1] || `${item._id.month}/${item._id.year}`) : "Unknown",
+        //             count: item.count
+        //         }));
+
+        //         // 4. Construct unified dynamic Activity Feed
+        //         const activities: any[] = [];
+
+        //         latestUsers.forEach(u => {
+        //             activities.push({
+        //                 id: `user_${u._id}`,
+        //                 type: 'user',
+        //                 message: `${u.name || 'A new user'} joined the system.`,
+        //                 createdAt: u.createdAt
+        //             });
+        //         });
+
+        //         latestCategories.forEach(c => {
+        //             activities.push({
+        //                 id: `cat_${c._id}`,
+        //                 type: 'category',
+        //                 message: `${c.createdBy === 'admin' ? 'Admin' : 'A user'} created the "${c.name}" category.`,
+        //                 createdAt: c.createdAt
+        //             });
+        //         });
+
+        //         latestInventory.forEach(i => {
+        //             activities.push({
+        //                 id: `inv_${i._id}`,
+        //                 type: 'inventory',
+        //                 message: `An item "${i.title}" was added to the ${i.room || 'Storage'}.`,
+        //                 createdAt: i.createdAt
+        //             });
+        //         });
+
+        //         // Sort compilation array globally by real-time timestamps
+        //         const sortedActivityFeed = activities
+        //             .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+        //             .slice(0, 5);
+
+        //         // 5. Response Pipeline Delivery
+        //         return res.status(200).json({
+        //             success: true,
+        //             data: {
+        //                 cards: {
+        //                     totalUsers,
+        //                     totalCategories,
+        //                     totalInventoryItems,
+        //                     defaultCategories
+        //                 },
+        //                 charts: {
+        //                     inventoryDistribution: inventoryDistributionRaw,
+        //                     userGrowth,
+        //                     itemsAdded
+        //                 },
+        //                 recentActivity: sortedActivityFeed
+        //             }
+        //         });
+
+        //     } catch (error) {
+        //         console.error("Dashboard Global Aggregation Failure:", error);
+        //         return res.status(500).json({
+        //             success: false,
+        //             message: "Internal server error: Failed to fetch admin metrics dashboard data cleanly."
+        //         });
+        //     }
+        // });
         app.get('/api/admin/dashboard/stats', verifyToken, async (req: Request, res: Response) => {
             try {
                 // 1. Strict Authorization Check
@@ -904,45 +1141,53 @@ async function run() {
                     inventoryCollection.countDocuments(),
                     categoriesCollection.countDocuments({ isDefault: true }),
 
-                    // Pie Chart: Inventory Items grouped by Category ID + Resilient Name Lookup
+                    // Pie Chart: Simplified, robust aggregation to cleanly group by Category Name
                     inventoryCollection.aggregate([
-                        { $match: { categoryId: { $exists: true, $ne: null } } },
                         {
-                            $group: {
-                                _id: "$categoryId",
-                                count: { $sum: 1 }
+                            // 1. Only process items that have a valid 24-hex string ID
+                            $match: {
+                                categoryId: {
+                                    $exists: true,
+                                    $type: "string",
+                                    $regex: /^[a-fA-F0-9]{24}$/
+                                }
                             }
                         },
                         {
+                            // 2. Safely convert to ObjectId without crashing the server
+                            $addFields: {
+                                categoryObjectId: { $toObjectId: "$categoryId" }
+                            }
+                        },
+                        {
+                            // 3. Lookup the category details
                             $lookup: {
                                 from: "categories",
-                                let: { catId: "$_id" },
-                                pipeline: [
-                                    {
-                                        $match: {
-                                            $expr: {
-                                                $eq: [
-                                                    "$_id",
-                                                    {
-                                                        $cond: {
-                                                            if: { $eq: [{ $type: "$$catId" }, "string"] },
-                                                            then: { $toObjectId: "$$catId" },
-                                                            else: "$$catId"
-                                                        }
-                                                    }
-                                                ]
-                                            }
-                                        }
-                                    }
-                                ],
+                                localField: "categoryObjectId",
+                                foreignField: "_id",
                                 as: "categoryDetails"
                             }
                         },
                         {
+                            // 4. Flatten the category array (preserveNullAndEmptyArrays handles deleted categories)
+                            $unwind: {
+                                path: "$categoryDetails",
+                                preserveNullAndEmptyArrays: true
+                            }
+                        },
+                        {
+                            // 5. Group directly by the NAME! This merges all fallbacks into ONE slice.
+                            $group: {
+                                _id: { $ifNull: ["$categoryDetails.name", "Uncategorized"] },
+                                value: { $sum: 1 }
+                            }
+                        },
+                        {
+                            // 6. Clean up output for the UI
                             $project: {
-                                name: { $ifNull: [{ $arrayElemAt: ["$categoryDetails.name", 0] }, "Uncategorized"] },
-                                value: "$count",
-                                _id: 0
+                                _id: 0,
+                                name: "$_id",
+                                value: 1
                             }
                         }
                     ]).toArray(),
@@ -961,7 +1206,7 @@ async function run() {
                         },
                         { $sort: { "_id.year": -1, "_id.month": -1 } }, // Grab the most recent months first
                         { $limit: 6 },
-                        { $sort: { "_id.year": 1, "_id.month": 1 } }   // Re-sort chronologically for UI chart layout
+                        { $sort: { "_id.year": 1, "_id.month": 1 } }    // Re-sort chronologically for UI chart layout
                     ]).toArray(),
 
                     // Line Chart: Global Inventory Additions Timeline (Corrected for Latest 6 Months)
@@ -978,7 +1223,7 @@ async function run() {
                         },
                         { $sort: { "_id.year": -1, "_id.month": -1 } }, // Grab the most recent months first
                         { $limit: 6 },
-                        { $sort: { "_id.year": 1, "_id.month": 1 } }   // Re-sort chronologically for UI chart layout
+                        { $sort: { "_id.year": 1, "_id.month": 1 } }    // Re-sort chronologically for UI chart layout
                     ]).toArray(),
 
                     // Recent System Activity Pulls (Last 3 entries from each collection)
