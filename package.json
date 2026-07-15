@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.ts",
   "scripts": {
-    "dev": "node --max-http-header-size=32768 node_modules/tsx/dist/cli.js watch index.ts",
+     "dev": "tsx watch index.ts",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],

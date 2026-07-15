@@ -214,7 +214,7 @@ async function run() {
         // Backend: GET /api/categories
         app.get('/api/categories', async (req: Request, res: Response) => {
             try {
-                const { search, categoryName } = req.query;
+                const { search, categoryName, page: pageQuery, limit: limitQuery } = req.query;
                 let filter: any = {};
 
                 if (search) {
@@ -224,14 +224,60 @@ async function run() {
                     filter.name = categoryName;
                 }
 
-                const categories = await categoriesCollection.find(filter).toArray();
+                // Support fetching all records at once (needed for your frontend's initial filter button list)
+                if (limitQuery === 'all') {
+                    const categories = await categoriesCollection.find(filter).toArray();
+                    return res.status(200).json({
+                        success: true,
+                        data: categories
+                    });
+                }
+
+                // Parse pagination values
+                const page = parseInt(pageQuery as string) || 1;
+                const limit = parseInt(limitQuery as string) || 9;
+                const skip = (page - 1) * limit;
+
+                // Fetch data pages and total counts concurrently
+                const [categories, totalItems] = await Promise.all([
+                    categoriesCollection.find(filter).skip(skip).limit(limit).toArray(),
+                    categoriesCollection.countDocuments(filter)
+                ]);
+
+                const totalPages = Math.ceil(totalItems / limit);
 
                 return res.status(200).json({
                     success: true,
-                    data: categories // Returns the full document including shortDescription, icon, etc.
+                    data: categories,
+                    pagination: {
+                        currentPage: page,
+                        totalPages: totalPages || 1,
+                        totalItems
+                    }
                 });
             } catch (error) {
                 return res.status(500).json({ success: false, message: "Internal server error." });
+            }
+        });
+        app.get('/api/categories/random', async (req: Request, res: Response) => {
+            try {
+                // Pulls 3 completely random category documents from the collection
+                const randomCategories = await categoriesCollection
+                    .aggregate([
+                        { $sample: { size: 3 } }
+                    ])
+                    .toArray();
+
+                return res.status(200).json({
+                    success: true,
+                    data: randomCategories
+                });
+            } catch (error) {
+                console.error("Error fetching random categories:", error);
+                return res.status(500).json({
+                    success: false,
+                    message: "Failed to fetch top categories."
+                });
             }
         });
         app.put('/api/categories/:id', verifyToken, async (req: AuthenticatedRequest, res: Response) => {
@@ -1042,6 +1088,55 @@ async function run() {
                 });
             }
         });
+        app.get('/api/stats/platform', async (req: Request, res: Response) => {
+            try {
+                // Run all platform-wide aggregation and document count tasks concurrently
+                const [
+                    totalCategories,
+                    totalItems,
+                    totalUsers,
+                    defaultCategories,
+                    customCategories,
+                    valueAggregation
+                ] = await Promise.all([
+                    categoriesCollection.countDocuments(),
+                    inventoryCollection.countDocuments(),
+                    usersCollection.countDocuments({ role: "user" }),
+                    categoriesCollection.countDocuments({ isDefault: true }),
+                    categoriesCollection.countDocuments({ isDefault: false }),
+                    inventoryCollection.aggregate([
+                        {
+                            $group: {
+                                _id: null,
+                                total: { $sum: { $toDouble: "$purchasePrice" } }
+                            }
+                        }
+                    ]).toArray()
+                ]);
+
+                // Extract total aggregated price safely, default to 0 if inventory is empty
+                const totalInventoryValue = valueAggregation[0]?.total || 0;
+
+                return res.status(200).json({
+                    success: true,
+                    data: {
+                        totalCategories,
+                        totalItems,
+                        totalUsers,
+                        defaultCategories,
+                        customCategories,
+                        totalInventoryValue
+                    }
+                });
+            } catch (error) {
+                console.error("Error generating platform metrics:", error);
+                return res.status(500).json({
+                    success: false,
+                    message: "Failed to compile platform metrics."
+                });
+            }
+        });
+
         console.log("Database initialized. HomeVault collections ready.");
 
         app.get('/', (req: Request, res: Response) => {
