@@ -207,104 +207,114 @@ async function run() {
 
         // Backend: GET /api/categories
         app.get('/api/categories', async (req: Request, res: Response) => {
-            try {
-                const {
-                    search,
-                    categoryName,
-                    timeFrame,
-                    sortBy = 'newest',
-                    page: pageQuery,
-                    limit: limitQuery
-                } = req.query;
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    res.setHeader('Surrogate-Control', 'no-store');
 
-                let filter: any = {};
+    try {
+        const {
+            search,
+            categoryName,
+            timeFrame,
+            sortBy = 'newest',
+            page: pageQuery,
+            limit: limitQuery
+        } = req.query;
 
-                // 1. Search Filter
-                if (search) {
-                    filter.name = { $regex: search, $options: 'i' };
-                }
+        let filter: any = {};
+        let conditions: any[] = []; // 👈 Store all filters in an array to prevent overwrites
 
-                // 2. Category Name Filter
-                if (categoryName && categoryName !== 'all') {
-                    filter.name = categoryName;
-                }
+        // 1. Search Filter (Looks in name OR shortDescription)
+        if (search) {
+            conditions.push({
+                $or: [
+                    { name: { $regex: search, $options: 'i' } },
+                    { shortDescription: { $regex: search, $options: 'i' } }
+                ]
+            });
+        }
 
-                // 3. Date / TimeFrame Filter
-                if (timeFrame && timeFrame !== 'all') {
-                    const now = new Date();
-                    let startDate = new Date();
+        // 2. Category Name Filter (Exact match)
+        if (categoryName && categoryName !== 'all') {
+            conditions.push({ name: categoryName });
+        }
 
-                    if (timeFrame === 'today') {
-                        startDate.setHours(0, 0, 0, 0);
-                    } else if (timeFrame === 'week') {
-                        startDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-                    } else if (timeFrame === 'month') {
-                        startDate = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-                    }
+        // 3. Date / TimeFrame Filter
+        if (timeFrame && timeFrame !== 'all') {
+            const now = new Date();
+            let startDate = new Date();
 
-                    filter.createdAt = { $gte: startDate };
-                }
+            if (timeFrame === 'today') {
+                startDate.setHours(0, 0, 0, 0);
+            } else if (timeFrame === 'week') {
+                startDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+            } else if (timeFrame === 'month') {
+                startDate = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+            }
 
-                // 4. Set Up Sorting Options
-                let sortOptions: any = { createdAt: -1 }; // Default: Newest First
+            conditions.push({ createdAt: { $gte: startDate } });
+        }
 
-                if (sortBy === 'oldest') {
-                    sortOptions = { createdAt: 1 };
-                } else if (sortBy === 'name-asc') {
-                    sortOptions = { name: 1 }; // A-Z
-                } else if (sortBy === 'name-desc') {
-                    sortOptions = { name: -1 }; // Z-A
-                }
+        // 👈 Apply all conditions using $and so they don't overwrite each other
+        if (conditions.length > 0) {
+            filter.$and = conditions;
+        }
 
-                // 5. Support fetching all records at once (for frontend initial filter bar)
-                if (limitQuery === 'all') {
-                    const categories = await categoriesCollection
-                        .find(filter)
-                        .sort(sortOptions) // Added sorting here
-                        .toArray();
+        // 4. Set Up Sorting Options
+        let sortOptions: any = { createdAt: -1 }; 
 
-                    return res.status(200).json({
-                        success: true,
-                        data: categories
-                    });
-                }
+        if (sortBy === 'oldest') {
+            sortOptions = { createdAt: 1 };
+        } else if (sortBy === 'name-asc') {
+            sortOptions = { name: 1 }; 
+        } else if (sortBy === 'name-desc') {
+            sortOptions = { name: -1 }; 
+        }
 
-                // 6. Parse pagination values
-                const page = parseInt(pageQuery as string) || 1;
-                const limit = parseInt(limitQuery as string) || 9;
-                const skip = (page - 1) * limit;
+        if (limitQuery === 'all') {
+            const categories = await categoriesCollection
+                .find(filter)
+                .sort(sortOptions)
+                .toArray();
 
-                // 7. Fetch data pages and total counts concurrently
-                const [categories, totalItems] = await Promise.all([
-                    categoriesCollection
-                        .find(filter)
-                        .sort(sortOptions) // Added sorting here
-                        .skip(skip)
-                        .limit(limit)
-                        .toArray(),
-                    categoriesCollection.countDocuments(filter)
-                ]);
+            return res.status(200).json({ success: true, data: categories });
+        }
 
-                const totalPages = Math.ceil(totalItems / limit);
+        const page = parseInt(pageQuery as string) || 1;
+        const limit = parseInt(limitQuery as string) || 9;
+        const skip = (page - 1) * limit;
 
-                return res.status(200).json({
-                    success: true,
-                    data: categories,
-                    pagination: {
-                        currentPage: page,
-                        totalPages: totalPages || 1,
-                        totalItems
-                    }
-                });
+        const [categories, totalItems] = await Promise.all([
+            categoriesCollection
+                .find(filter)
+                .sort(sortOptions)
+                .skip(skip)
+                .limit(limit)
+                .toArray(),
+            categoriesCollection.countDocuments(filter)
+        ]);
 
-            } catch (error) {
-                console.error("Error fetching categories:", error);
-                return res.status(500).json({
-                    success: false,
-                    message: "Internal server error."
-                });
+        const totalPages = Math.ceil(totalItems / limit);
+
+        return res.status(200).json({
+            success: true,
+            data: categories,
+            pagination: {
+                currentPage: page,
+                totalPages: totalPages || 1,
+                totalItems
             }
         });
+
+    } catch (error) {
+        console.error("Error fetching categories:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Internal server error."
+        });
+    }
+});
         app.get('/api/categories/random', async (req: Request, res: Response) => {
             try {
                 const randomCategories = await categoriesCollection
