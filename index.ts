@@ -21,7 +21,7 @@ app.use(express.json());
 app.use(cookieParser()); // 1. Added middleware
 
 app.use(cors({
-    origin: "http://localhost:3000",
+    origin: process.env.CLIENT_URL,
     credentials: true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization", "Cookie"],
@@ -73,9 +73,6 @@ const verifyToken = async (req: AuthenticatedRequest, res: Response, next: NextF
 
         console.log("JWT Payload:", payload);
 
-        // ---------------- NEW CODE START ----------------
-
-        // Better Auth stores the user id in payload.sub
         const userId = payload.sub;
 
         if (!userId) {
@@ -111,9 +108,6 @@ const verifyToken = async (req: AuthenticatedRequest, res: Response, next: NextF
             role: user.role,
             isBlocked: user.isBlocked
         } as any;
-
-        // ---------------- NEW CODE END ----------------
-
         next();
 
     } catch (error: any) {
@@ -126,7 +120,7 @@ const verifyToken = async (req: AuthenticatedRequest, res: Response, next: NextF
 };
 async function run() {
     try {
-        await client.connect();
+        // await client.connect();
         const db: Db = client.db("homevault");
         const usersCollection = db.collection('user');
         // 1. category table
@@ -371,9 +365,6 @@ async function run() {
                     return res.status(404).json({ success: false, message: "Category not found." });
                 }
 
-                // 4. Return full document
-                // Because your database document already contains the new fields 
-                // (fullDescription, itemTypes, etc.), this will send them to the client automatically.
                 return res.status(200).json({
                     success: true,
                     data: category
@@ -401,7 +392,6 @@ async function run() {
             createdAt: Date;
             updatedAt: Date;
         }
-
         const inventoryCollection: Collection<InventoryDocument> = db.collection('inventory');
 
         // 2. POST API Endpoint: Create Inventory Item
@@ -461,38 +451,7 @@ async function run() {
                 return res.status(500).json({ success: false, message: "Internal server error." });
             }
         });
-        // 3. GET API Endpoint: Retrieve Inventory Items (with User Filter)
-        // app.get('/api/inventory', verifyToken, async (req: any, res: Response) => {
-        //     try {
-        //         const userId = req.user?.id;
-        //         const { categoryId } = req.query;
-
-        //         if (!userId) {
-        //             return res.status(401).json({ success: false, message: "Unauthorized." });
-        //         }
-
-        //         const query: any = { userId: userId };
-
-        //         if (categoryId) {
-        //             query.categoryId = categoryId.toString();
-        //         }
-
-        //         const items = await inventoryCollection
-        //             .find(query)
-        //             .sort({ createdAt: -1 })
-        //             .toArray();
-
-        //         return res.status(200).json({
-        //             success: true,
-        //             count: items.length,
-        //             data: items
-        //         });
-
-        //     } catch (error) {
-        //         console.error("Error fetching inventory items:", error);
-        //         return res.status(500).json({ success: false, message: "Internal server error." });
-        //     }
-        // });
+        
         // 3. GET API Endpoint: Retrieve Inventory Items (with Category Join)
         app.get('/api/inventory', verifyToken, async (req: any, res: Response) => {
             try {
