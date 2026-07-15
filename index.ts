@@ -255,7 +255,6 @@ async function run() {
         });
         app.get('/api/categories/random', async (req: Request, res: Response) => {
             try {
-                // Pulls 3 completely random category documents from the collection
                 const randomCategories = await categoriesCollection
                     .aggregate([
                         { $sample: { size: 3 } }
@@ -451,7 +450,7 @@ async function run() {
                 return res.status(500).json({ success: false, message: "Internal server error." });
             }
         });
-        
+
         // 3. GET API Endpoint: Retrieve Inventory Items (with Category Join)
         app.get('/api/inventory', verifyToken, async (req: any, res: Response) => {
             try {
@@ -756,7 +755,6 @@ async function run() {
                         }
                     ]).toArray(),
 
-                    // B. Chart: Items by Category (Joining with Categories table to get names)
                     // B. Chart: Items by Category
                     inventoryCollection.aggregate([
                         { $match: { userId: userFilter } },
@@ -774,7 +772,8 @@ async function run() {
                                     {
                                         $match: {
                                             $expr: {
-                                                $eq: ["$_id", { $toObjectId: "$$catId" }] // Converts string ID to ObjectId for matching
+                                                // Check if valid string before converting to avoid ObjectId conversion errors
+                                                $eq: ["$_id", { $toObjectId: "$$catId" }]
                                             }
                                         }
                                     }
@@ -786,6 +785,20 @@ async function run() {
                             $project: {
                                 name: { $ifNull: [{ $arrayElemAt: ["$categoryInfo.name", 0] }, "Uncategorized"] },
                                 value: "$count"
+                            }
+                        },
+                        // --- ADD THIS NEW GROUPING STAGE TO MERGE DUPLICATE NAMES ---
+                        {
+                            $group: {
+                                _id: "$name",
+                                value: { $sum: "$value" }
+                            }
+                        },
+                        {
+                            $project: {
+                                _id: 0,
+                                name: "$_id",
+                                value: 1
                             }
                         }
                     ]).toArray(),
